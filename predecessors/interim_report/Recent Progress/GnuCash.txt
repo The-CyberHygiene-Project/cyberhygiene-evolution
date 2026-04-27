@@ -1,0 +1,77 @@
+### Shell Script: `install_gnucash.sh`
+
+```bash
+#!/bin/bash
+
+# Script to install GnuCash on Ubuntu 22.04 LTS
+
+# Exit on any error
+set -e
+
+# Variables
+LOG_FILE="/var/log/gnucash_install.log"
+
+# Function to log messages
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+# Check if script is run with sudo
+check_sudo() {
+    if [ "$(id -u)" -ne 0 ]; then
+        log "ERROR: This script must be run as root or with sudo."
+        exit 1
+    fi
+}
+
+# Check if system is Ubuntu 22.04
+check_system() {
+    if ! lsb_release -d | grep -q "Ubuntu 22.04"; then
+        log "ERROR: This script is designed for Ubuntu 22.04 LTS."
+        exit 1
+    fi
+}
+
+# Install GnuCash and dependencies
+install_gnucash() {
+    log "Updating package lists..."
+    if ! apt update -y; then
+        log "ERROR: Failed to update package lists."
+        exit 1
+    fi
+
+    log "Installing GnuCash..."
+    if ! apt install -y gnucash; then
+        log "ERROR: Failed to install GnuCash."
+        exit 1
+    fi
+}
+
+# Verify installation
+verify_installation() {
+    log "Verifying GnuCash installation..."
+    if dpkg -l | grep -q gnucash; then
+        log "GnuCash is installed."
+        GNUCASH_VERSION=$(gnucash --version | head -n 1 | awk '{print $3}')
+        log "GnuCash version: $GNUCASH_VERSION"
+    else
+        log "ERROR: GnuCash installation not found."
+        exit 1
+    fi
+}
+
+# Main execution
+log "Starting GnuCash installation on Ubuntu 22.04..."
+
+check_sudo
+check_system
+install_gnucash
+verify_installation
+
+log "Installation completed successfully!"
+log "Launch GnuCash from the Application menu or by running 'gnucash' in the terminal."
+log "For more information, visit https://www.gnucash.org/docs.phtml"
+
+exit 0
+```
+

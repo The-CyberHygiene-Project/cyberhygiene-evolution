@@ -1,0 +1,219 @@
+NIST recommendations for disk encryption, such as those in NIST SP 800-53 and 800-88, emphasize strong encryption (e.g., AES-256), secure key management, and proper partitioning to protect data at rest. While no single `autoinstall.yaml` file is explicitly endorsed by NIST, I can provide a template for Ubuntu 24.04 that aligns with NIST guidelines by using LUKS encryption with LVM, secure partitioning, and considerations for key management. This configuration assumes a UEFI system, as most modern systems use UEFI, and incorporates NIST-aligned practices like full disk encryption (FDE) with a secure key.
+
+Below is a detailed `autoinstall.yaml` configuration that sets up an Ubuntu system with:
+- A GPT partition table
+- An EFI System Partition (ESP) for UEFI boot
+- A /boot partition (unencrypted, as required for most bootloaders)
+- A LUKS-encrypted partition containing an LVM volume group with logical volumes for root and swap
+- A randomly generated key file for LUKS to avoid hardcoded passwords, with post-installation steps for potential TPM integration
+- Compliance with NIST’s cryptographic requirements (AES-256 via LUKS) and secure partitioning
+
+### Autoinstall.yaml Configuration
+
+```yaml
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: ubuntu-nist
+    username: admin
+    password: "$6$rounds=656000$<hashed_password>"  # Generate with: python3 -c "import crypt; print(crypt.crypt('your_password', crypt.mksalt(crypt.METHOD_SHA512)))"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys: ["<your_ssh_public_key>"]
+  apt:
+    geoip: true
+    preserve_sources_list: false
+    primary:
+      - arches: [amd64, i386]
+        uri: http://us.archive.ubuntu.com/ubuntu
+      - arches: [default]
+        uri: http://ports.ubuntu.com/ubuntu-ports
+  early-commands:
+    - mkdir -p /etc/cryptsetup-keys.d
+    - dd if=/dev/urandom of=/etc/cryptsetup-keys.d/root.key bs=256 count=1
+    - chmod 600 /etc/cryptsetup-keys.d/root.key
+  storage:
+    config:
+      - id: disk-sda
+        type: disk
+        ptable: gpt
+        match:
+          ssd: true
+        wipe: superblock-recursive
+        preserve: false
+        grub_device: true
+      - id: partition-efi
+        type: partition
+        device: disk-sda
+        size: 512M
+        wipe: superblock
+        flag: boot
+        number: 1
+        preserve: false
+        grub_device: true
+      - id: format-efi
+        type: format
+        fstype: fat32
+        volume: partition-efi
+        preserve: false
+      - id: mount-efi
+        type: mount
+        device: format-efi
+        path: /boot/efi
+      - id: partition-boot
+        type: partition
+        device: disk-sda
+        size: 1G
+        wipe: superblock
+        number: 2
+        preserve: false
+      - id: format-boot
+        type: format
+        fstype: ext4
+        volume: partition-boot
+        preserve: false
+      - id: mount-boot
+        type: mount
+        device: format-boot
+        path: /boot
+      - id: partition-luks
+        type: partition
+        device: disk-sda
+        size: -1  # Use remaining space
+        wipe: superblock
+        number: 3
+        preserve: false
+      - id: luks-container
+        type: dm_crypt
+        volume: partition-luks
+        keyfile: /etc/cryptsetup-keys.d/root.key
+        dm_name: cryptlvm
+        preserve: false
+      - id: vg-system
+        type: lvm_volgroup
+        name: vg-system
+        devices: [luks-container]
+        preserve: false
+      - id: lv-root
+        type: lvm_partition
+        name: lv-root
+        volgroup: vg-system
+        size: 50G
+        wipe: superblock
+        preserve: false
+      - id: format-root
+        type: format
+        fstype: ext4
+        volume: lv-root
+        preserve: false
+      - id: mount-root
+        type: mount
+        device: format-root
+        path: /
+      - id: lv-swap
+        type: lvm_partition
+        name: lv-swap
+        volgroup: vg-system
+        size: 8G
+        wipe: superblock
+        preserve: false
+      - id: format-swap
+        type: format
+        fstype: swap
+        volume: lv-swap
+        preserve: false
+      - id: mount-swap
+        type: mount
+        device: format-swap
+        path: ""
+  late-commands:
+    - mkdir -p /target/etc/cryptsetup-keys.d /target/etc/cryptsetup-initramfs
+    - bash -c 'luks_uuid=$(blkid -t TYPE=crypto_LUKS -s UUID -o value); cp /etc/cryptsetup-keys.d/root.key "/target/etc/cryptsetup-keys.d/${luks_uuid}.key"; chmod 600 "/target/etc/cryptsetup-keys.d/${luks_uuid}.key"; echo "cryptlvm UUID=${luks_uuid} /etc/cryptsetup-keys.d/${luks_uuid}.key luks" > /target/etc/crypttab; echo "KEYFILE_PATTERN=/etc/cryptsetup-keys.d/*.key" >> /target/etc/cryptsetup-initramfs/conf-hook;'
+    - curtin in-target --target=/target -- apt update
+    - curtin in-target --target=/target -- apt install -y clevis clevis-luks clevis-tpm2 tpm2-tools clevis-initramfs
+    - curtin in-target --target=/target -- update-initramfs -c -k all
+```
+
+### Explanation of NIST Compliance
+
+1. **Encryption Standards (NIST SP 800-53, SC-28)**:
+   - LUKS with AES-256 (default in Ubuntu) is used for encryption, meeting NIST’s cryptographic requirements.
+   - A random 256-byte key file is generated during installation (`early-commands`) to unlock the LUKS container, avoiding hardcoded passwords and aligning with secure key management practices.
+
+2. **Partitioning**:
+   - **EFI Partition (512M, fat32)**: Required for UEFI boot, mounted at `/boot/efi`.
+   - **Boot Partition (1G, ext4)**: Unencrypted, as GRUB typically cannot read LUKS-encrypted `/boot` without additional configuration (see notes below).
+   - **LUKS-Encrypted Partition**: Contains an LVM volume group with logical volumes for root (`/`, 50G) and swap (8G), ensuring all sensitive data is encrypted.
+
+3. **Secure Key Management**:
+   - The key file is stored in `/etc/cryptsetup-keys.d` with restrictive permissions (`chmod 600`).
+   - `late-commands` copy the key to the target system, update `/etc/crypttab`, and integrate it into the initramfs for automatic unlocking at boot.
+   - The configuration installs `clevis` and `tpm2-tools` for optional post-install TPM integration, allowing the LUKS key to be bound to a Trusted Platform Module (TPM) for enhanced security (NIST SP 800-53, IA-5).
+
+4. **Data Sanitization (NIST SP 800-88)**:
+   - The `wipe: superblock-recursive` ensures existing disk superblocks are cleared, reducing the risk of data remanence.
+   - The LUKS-encrypted partition ensures data is unreadable without the key, aligning with NIST guidelines for protecting data at rest.
+
+5. **Access Control**:
+   - SSH is configured with public key authentication (`allow-pw: false`), aligning with NIST’s access control recommendations (AC-3, AC-17).
+   - The user password is hashed with SHA-512, a NIST-approved algorithm.
+
+### Usage Instructions
+
+1. **Generate Hashed Password**:
+   Run the following to create a hashed password for the `identity` section:
+   ```bash
+   python3 -c "import crypt; print(crypt.crypt('your_password', crypt.mksalt(crypt.METHOD_SHA512)))"
+   ```
+   Replace `<hashed_password>` in the YAML with the output.
+
+2. **Add SSH Key**:
+   Replace `<your_ssh_public_key>` with your SSH public key for secure access.
+
+3. **Create Bootable Media**:
+   - Download the Ubuntu 24.04 ISO.
+   - Place the `autoinstall.yaml` in a `user-data` file alongside an empty `meta-data` file.
+   - Create a bootable ISO with:
+     ```bash
+     cloud-localds autoinstall.iso user-data meta-data
+     ```
+   - Flash the Ubuntu ISO and `autoinstall.iso` to a USB drive or mount them via a virtual console (e.g., IPMI).
+
+4. **Boot and Install**:
+   - Boot the system with the Ubuntu ISO and select the autoinstall option.
+   - The installer will use the provided `autoinstall.yaml` to configure the system automatically.
+
+5. **Post-Installation (Optional TPM Integration)**:
+   To bind the LUKS key to a TPM for automatic unlocking (NIST SP 800-53, SC-12):
+   ```bash
+   clevis luks bind -f -d /dev/sda3 tpm2 '{"pcr_ids":"7"}' <<< "$(cat /etc/cryptsetup-keys.d/<luks_uuid>.key)"
+   update-initramfs -u
+   ```
+   Replace `/dev/sda3` with the actual LUKS partition and `<luks_uuid>` with the UUID from `blkid`.
+
+### Notes and Limitations
+
+- **Unencrypted /boot**: GRUB typically requires an unencrypted `/boot` to load the kernel and initramfs. Encrypting `/boot` is possible but complex and not supported by Ubuntu’s default installer. For NIST compliance in high-security environments, consider additional protections like Secure Boot or a custom GRUB setup with TPM integration (see for details).[](https://askubuntu.com/questions/1328189/ubuntu-20-04-autoinstaller-uefi-full-disk-encryption)
+- **Dynamic Passwords**: If you need a unique password per device (e.g., based on serial number), you can modify `early-commands` to retrieve the serial number and use it as the LUKS key:
+  ```yaml
+  early-commands:
+    - S=$(dmidecode -s system-serial-number); dd if=/dev/urandom bs=1 count=32 | openssl sha256 > /etc/cryptsetup-keys.d/root.key; echo -n "$S" >> /etc/cryptsetup-keys.d/root.key; chmod 600 /etc/cryptsetup-keys.d/root.key
+  ```
+  This approach hashes the serial number for added security ().[](https://www.linuxquestions.org/questions/ubuntu-63/autoinstall-storage-4175746605/)
+- **TPM Integration**: The provided `late-commands` install tools for TPM-based key management, but you must manually bind the key post-installation. This aligns with NIST’s emphasis on hardware-based key storage.
+- **Backup**: NIST SP 800-88 recommends data backups. Ensure you have a backup strategy (e.g., ZFS snapshots or external backups) to prevent data loss ().[](https://nsg.cc/post/2024/autoinstall/)
+- **Testing**: Test the configuration in a virtual machine to ensure compatibility with your hardware, as disk paths (`/dev/sda`) may vary.
+
+### Sources
+This configuration is based on best practices from:
+- Ubuntu’s autoinstall documentation (,)[](https://canonical-subiquity.readthedocs-hosted.com/en/latest/reference/autoinstall-reference.html)[](https://discourse.ubuntu.com/t/automated-server-installer-config-file-reference/16613)
+- Examples of LUKS and LVM setups (,,)[](https://nsg.cc/post/2024/autoinstall/)[](https://dev.to/achu1612/full-disk-encryption-fde-with-ubuntu-autoinstall-2dk0)[](https://github.com/asayler/ubuntu_autoinstall)
+- NIST SP 800-53 (SC-28, IA-5) and SP 800-88 for encryption and data sanitization ()[](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/515)
+- Community discussions on dynamic passwords and TPM integration (,)[](https://askubuntu.com/questions/1328189/ubuntu-20-04-autoinstaller-uefi-full-disk-encryption)[](https://www.linuxquestions.org/questions/ubuntu-63/autoinstall-storage-4175746605/)
+
+If you need a specific variation (e.g., ZFS instead of LVM, or encrypting `/boot`), let me know, and I can tailor the configuration further!

@@ -1,0 +1,126 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: ubuntu-nist
+    username: admin
+    password: "$6$rounds=656000$<hashed_password>"  # Generate with: python3 -c "import crypt; print(crypt.crypt('your_password', crypt.mksalt(crypt.METHOD_SHA512)))"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys: ["<your_ssh_public_key>"]
+  apt:
+    geoip: true
+    preserve_sources_list: false
+    primary:
+      - arches: [amd64, i386]
+        uri: http://us.archive.ubuntu.com/ubuntu
+      - arches: [default]
+        uri: http://ports.ubuntu.com/ubuntu-ports
+  early-commands:
+    - mkdir -p /etc/cryptsetup-keys.d
+    - dd if=/dev/urandom of=/etc/cryptsetup-keys.d/root.key bs=256 count=1
+    - chmod 600 /etc/cryptsetup-keys.d/root.key
+  storage:
+    config:
+      - id: disk-sda
+        type: disk
+        ptable: gpt
+        match:
+          ssd: true
+        wipe: superblock-recursive
+        preserve: false
+        grub_device: true
+      - id: partition-efi
+        type: partition
+        device: disk-sda
+        size: 512M
+        wipe: superblock
+        flag: boot
+        number: 1
+        preserve: false
+        grub_device: true
+      - id: format-efi
+        type: format
+        fstype: fat32
+        volume: partition-efi
+        preserve: false
+      - id: mount-efi
+        type: mount
+        device: format-efi
+        path: /boot/efi
+      - id: partition-boot
+        type: partition
+        device: disk-sda
+        size: 1G
+        wipe: superblock
+        number: 2
+        preserve: false
+      - id: format-boot
+        type: format
+        fstype: ext4
+        volume: partition-boot
+        preserve: false
+      - id: mount-boot
+        type: mount
+        device: format-boot
+        path: /boot
+      - id: partition-luks
+        type: partition
+        device: disk-sda
+        size: -1  # Use remaining space
+        wipe: superblock
+        number: 3
+        preserve: false
+      - id: luks-container
+        type: dm_crypt
+        volume: partition-luks
+        keyfile: /etc/cryptsetup-keys.d/root.key
+        dm_name: cryptlvm
+        preserve: false
+      - id: vg-system
+        type: lvm_volgroup
+        name: vg-system
+        devices: [luks-container]
+        preserve: false
+      - id: lv-root
+        type: lvm_partition
+        name: lv-root
+        volgroup: vg-system
+        size: 50G
+        wipe: superblock
+        preserve: false
+      - id: format-root
+        type: format
+        fstype: ext4
+        volume: lv-root
+        preserve: false
+      - id: mount-root
+        type: mount
+        device: format-root
+        path: /
+      - id: lv-swap
+        type: lvm_partition
+        name: lv-swap
+        volgroup: vg-system
+        size: 8G
+        wipe: superblock
+        preserve: false
+      - id: format-swap
+        type: format
+        fstype: swap
+        volume: lv-swap
+        preserve: false
+      - id: mount-swap
+        type: mount
+        device: format-swap
+        path: ""
+  late-commands:
+    - mkdir -p /target/etc/cryptsetup-keys.d /target/etc/cryptsetup-initramfs
+    - bash -c 'luks_uuid=$(blkid -t TYPE=crypto_LUKS -s UUID -o value); cp /etc/cryptsetup-keys.d/root.key "/target/etc/cryptsetup-keys.d/${luks_uuid}.key"; chmod 600 "/target/etc/cryptsetup-keys.d/${luks_uuid}.key"; echo "cryptlvm UUID=${luks_uuid} /etc/cryptsetup-keys.d/${luks_uuid}.key luks" > /target/etc/crypttab; echo "KEYFILE_PATTERN=/etc/cryptsetup-keys.d/*.key" >> /target/etc/cryptsetup-initramfs/conf-hook;'
+    - curtin in-target --target=/target -- apt update
+    - curtin in-target --target=/target -- apt install -y clevis clevis-luks clevis-tpm2 tpm2-tools clevis-initramfs
+    - curtin in-target --target=/target -- update-initramfs -c -k all

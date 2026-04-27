@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+._*
+
+# Editor swap / temp
+*.swp
+*.swo
+*~
+
+# Python build artifacts
+__pycache__/
+*.pyc
+
+# Office temp lockfiles
+~$*.docx
+~$*.xlsx
+~$*.pptx
